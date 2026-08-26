@@ -1,0 +1,10 @@
+apiVersion: dns3l.github.io/v1alpha1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/name: dns3l-certmgr-issuer
+    app.kubernetes.io/managed-by: kustomize
+  name: issuer-sample
+spec:
+  url: https://dns3l.example.com
+  caid: letsencrypt

@@ -1,0 +1,29 @@
+# This rule is not used by the project dns3l-certmgr-issuer itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants read-only access to dns3l.github.io resources.
+# This role is intended for users who need visibility into these resources
+# without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: dns3l-certmgr-issuer
+    app.kubernetes.io/managed-by: kustomize
+  name: dns3lclusterissuer-viewer-role
+rules:
+- apiGroups:
+  - dns3l.github.io
+  resources:
+  - dns3lclusterissuers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - dns3l.github.io
+  resources:
+  - dns3lclusterissuers/status
+  verbs:
+  - get

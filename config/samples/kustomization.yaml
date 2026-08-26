@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- dns3l.github.io_v1alpha1_dns3lissuer.yaml
+- dns3l.github.io_v1alpha1_dns3lclusterissuer.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
