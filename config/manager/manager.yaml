@@ -69,7 +69,9 @@ spec:
           - name: HTTPS_PROXY
             value: ""
           - name: NO_PROXY
-            value: "" 
+            value: ""
+          - name: DNS3L_ISSUER_CREATE_CERT_ENABLED
+            value: ""
         image: controller:latest
         name: manager
         ports:

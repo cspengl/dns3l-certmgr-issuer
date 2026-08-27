@@ -132,3 +132,19 @@ Hereby following things must match:
 - The `cert-manager.io/certificate-name` annotation in the secret must match the name of the `Certificate` resource.
 - The `privateKey` spec must match the private key of the certificate created in DNS3L.
 - The `rotationPolicy` must be set to `Never` since the private key is not known to the issuer and cannot be rotated.
+
+### Experimental: Using the dns3l-certmgr-issuer to create certificates
+
+Usually cert-manager takes care about creating the certificate key pair. To prevent this and let DNS3L manage the keys, we can follow the workflow described above and pre-provision the key and secret in the cluster. To really create certificates in DNS3L by using the DNS3L cert-manager issuer, we need to perform following steps:
+
+1. Disable the cert-manager validation for the namespace where we want to create the certificate
+    ```bash
+    kubectl label namespace <namespace> cert-manager.io/disable-validation=true
+    ```
+
+2. Enable the experimental feature in the dns3l-certmgr-issuer by setting the feature flag:
+    ```bash
+    make helm-deploy HELM_EXTRA_ARGS="--set manager.envOverrides.DNS3L_ISSUER_CREATE_CERT_ENABLED=true" IMG=ghcr.io/dns3l/dns3l-certmgr-issuer:latest
+    ```
+
+Afterwards certificates can be created as usual as described in the cert-manager documentation.

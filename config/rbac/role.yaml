@@ -5,12 +5,22 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - cert-manager.io
   resources:
   - certificaterequests
   verbs:
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - cert-manager.io

@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -56,6 +57,12 @@ const issuerName = "dns3l-issuer.dns3l.github.io"
 
 // SetupWithManager sets up the controller with the Manager.
 func (i *Issuer) SetupWithManager(mgr ctrl.Manager) error {
+	signChain := SignMiddlewareChain(i.FetchCertificate)
+
+	if os.Getenv(createCertEnabledEnv) != "" {
+		signChain.Add(CreateCert(i.Client))
+	}
+
 	return (&controllers.CombinedController{
 		IssuerTypes:        []issuerapi.Issuer{&dns3lissuerapi.Issuer{}},
 		ClusterIssuerTypes: []issuerapi.Issuer{&dns3lissuerapi.ClusterIssuer{}},
@@ -63,7 +70,7 @@ func (i *Issuer) SetupWithManager(mgr ctrl.Manager) error {
 		FieldOwner:       issuerName,
 		MaxRetryDuration: 1 * time.Minute,
 
-		Sign:  i.FetchCertificate,
+		Sign:  signChain.SignFunc(),
 		Check: i.Check,
 
 		EventRecorder: mgr.GetEventRecorder(issuerName),
@@ -137,7 +144,7 @@ func getDNS3LCrtName(commonName string) string {
 	return commonName
 }
 
-func getCommonName(csrPEM []byte) (string, error) {
+func getCR(csrPEM []byte) (*x509.CertificateRequest, error) {
 	csrDER := csrPEM
 	pemBlock, _ := pem.Decode(csrPEM)
 	if pemBlock != nil {
@@ -145,10 +152,18 @@ func getCommonName(csrPEM []byte) (string, error) {
 	}
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return csr.Subject.CommonName, nil
+	return csr, nil
+}
+
+func getCommonName(csrPEM []byte) (string, error) {
+	cr, err := getCR(csrPEM)
+	if err != nil {
+		return "", err
+	}
+	return cr.Subject.CommonName, nil
 }
 
 func getDNS3LIssuer(issuer issuerapi.Issuer) (*dns3lissuerapi.IssuerSpec, error) {

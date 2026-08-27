@@ -11,12 +11,22 @@ metadata:
   name: {{ include "dns3l-certmgr-issuer.resourceName" (dict "suffix" "manager-role" "context" $) }}
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - cert-manager.io
   resources:
   - certificaterequests
   verbs:
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - cert-manager.io

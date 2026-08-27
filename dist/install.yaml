@@ -501,12 +501,22 @@ metadata:
   name: dns3l-certmgr-issuer-manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - cert-manager.io
   resources:
   - certificaterequests
   verbs:
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - cert-manager.io
@@ -680,6 +690,8 @@ spec:
         - name: HTTPS_PROXY
           value: ""
         - name: NO_PROXY
+          value: ""
+        - name: DNS3L_ISSUER_CREATE_CERT_ENABLED
           value: ""
         image: ghcr.io/dns3l/dns3l-certmgr-issuer:dev
         livenessProbe:
