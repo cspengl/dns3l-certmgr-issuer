@@ -17,9 +17,14 @@ package controller
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +36,7 @@ import (
 	issuerapi "github.com/cert-manager/issuer-lib/api/v1alpha1"
 	"github.com/cert-manager/issuer-lib/controllers/signer"
 
+	dns3lissuerapi "github.com/dns3l/dns3l-certmgr-issuer/api/v1alpha1"
 	dns3lclient "github.com/dns3l/dns3l-certmgr-issuer/internal/client"
 	dns3lapi "github.com/dns3l/dns3l-core/api/v1"
 )
@@ -52,8 +58,6 @@ type createCertMiddleware struct {
 
 func (c *createCertMiddleware) createCert(next signer.Sign) signer.Sign {
 	return func(ctx context.Context, cr signer.CertificateRequestObject, issuerObject issuerapi.Issuer) (signer.PEMBundle, error) {
-		logger := logs.FromContext(ctx, issuerName)
-
 		dns3lIssuer, err := getDNS3LIssuer(issuerObject)
 		if err != nil {
 			return signer.PEMBundle{}, err
@@ -63,7 +67,6 @@ func (c *createCertMiddleware) createCert(next signer.Sign) signer.Sign {
 		if err != nil {
 			return signer.PEMBundle{}, err
 		}
-
 		crDetails, err := cr.GetCertificateDetails()
 		if err != nil {
 			return signer.PEMBundle{}, err
@@ -76,72 +79,162 @@ func (c *createCertMiddleware) createCert(next signer.Sign) signer.Sign {
 
 		crtName := getDNS3LCrtName(csr.Subject.CommonName)
 
-		_, err = dns3lClient.GetCertificate(ctx, dns3lIssuer.CAID, crtName)
-		if err == nil {
-			// Certificate already exists, no need to create it again
-			return next(ctx, cr, issuerObject)
-		}
-
-		errMsg, ok := err.(dns3lclient.ErrorMessage)
-		if !ok || errMsg.Code != 404 {
-			// If the error is not a 404, return the error
-			return signer.PEMBundle{}, err
-		}
-
-		logger.Info("certificate not found, creating new certificate",
-			"certificate", crtName,
-			"ca", dns3lIssuer.CAID,
-		)
-
-		// Create certificate
-		err = dns3lClient.ClaimCertificate(
-			ctx, dns3lIssuer.CAID, &dns3lapi.CertClaimInfo{
-				Name:            crtName,
-				Wildcard:        strings.HasPrefix(csr.Subject.CommonName, "*."),
-				SubjectAltNames: csr.DNSNames,
-			},
-		)
+		claimed, err := c.claimIfNotExist(ctx, dns3lClient, dns3lIssuer, cr)
 		if err != nil {
 			return signer.PEMBundle{}, err
 		}
 
-		logger.Info("certificate created successfully",
-			"certificate", crtName,
-			"ca", dns3lIssuer.CAID,
-		)
+		returnAfterClaim := func(b signer.PEMBundle, err error) (signer.PEMBundle, error) {
+			if err == nil || !claimed {
+				return b, err
+			}
+
+			delErr := dns3lClient.DeleteCertificate(ctx, dns3lIssuer.CAID, crtName)
+			if delErr != nil {
+				err = errors.Join(fmt.Errorf("failed to delete certificate after error: %w", delErr), err)
+			}
+			return b, err
+		}
 
 		// Call next middleware
 		bundle, err := next(ctx, cr, issuerObject)
 		if err != nil {
-			// if there was an error delete the created certificate
-			delErr := dns3lClient.DeleteCertificate(ctx, dns3lIssuer.CAID, crtName)
-			if delErr != nil {
-				logger.Error(delErr, "failed to delete certificate after signing error",
-					"certificate", crtName,
-					"ca", dns3lIssuer.CAID,
-				)
-			}
-			return signer.PEMBundle{}, err
+			return returnAfterClaim(bundle, err)
 		}
 
-		// If successful, patch keys in CSR and secret
 		crtRes, err := dns3lClient.GetCertificatePEM(ctx, dns3lIssuer.CAID, crtName)
 		if err != nil {
-			return signer.PEMBundle{}, err
+			return returnAfterClaim(bundle, err)
 		}
 
-		err = c.patchPrivateKeyInSecret(ctx, cr, crtRes)
+		// Check if keys need to be patched in CSR and secret
+		// Keys must be patched if the key used
+		// to sign the CSR is not the same as the key in DNS3L.
+		keysMatch, err := c.privateKeysMatch(ctx, cr, crtRes.Key)
 		if err != nil {
-			return signer.PEMBundle{}, err
+			return returnAfterClaim(bundle, err)
+		}
+		if keysMatch {
+			return bundle, nil
 		}
 
 		err = c.patchCertificateRequestPublicKey(ctx, cr, crtRes)
 		if err != nil {
-			return signer.PEMBundle{}, err
+			return returnAfterClaim(bundle, err)
 		}
 
-		return bundle, err
+		err = c.patchPrivateKeyInSecret(ctx, cr, crtRes)
+		if err != nil {
+			return returnAfterClaim(bundle, err)
+		}
+
+		return bundle, nil
 	}
+}
+
+func (c *createCertMiddleware) claimIfNotExist(
+	ctx context.Context, dns3lClient *dns3lclient.Client, dns3lIssuer *dns3lissuerapi.IssuerSpec, cr signer.CertificateRequestObject,
+) (claimed bool, err error) {
+	crDetails, err := cr.GetCertificateDetails()
+	if err != nil {
+		return false, err
+	}
+
+	csr, err := getCR(crDetails.CSR)
+	if err != nil {
+		return false, err
+	}
+
+	crtName := getDNS3LCrtName(csr.Subject.CommonName)
+
+	_, err = dns3lClient.GetCertificate(ctx, dns3lIssuer.CAID, crtName)
+	errMsg, ok := err.(dns3lclient.ErrorMessage)
+	if !ok || errMsg.Code != 404 {
+		// If the error is not a 404, return the error
+		return false, err
+	}
+
+	logger := logs.FromContext(ctx, issuerName)
+	logger.Info("certificate not found, creating new certificate",
+		"certificate", crtName,
+	)
+
+	// Create certificate
+	err = dns3lClient.ClaimCertificate(
+		ctx, dns3lIssuer.CAID, &dns3lapi.CertClaimInfo{
+			Name:            crtName,
+			Wildcard:        strings.HasPrefix(csr.Subject.CommonName, "*."),
+			SubjectAltNames: csr.DNSNames,
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+
+	logger.Info("certificate created successfully",
+		"certificate", crtName,
+	)
+
+	return true, nil
+}
+
+func (c *createCertMiddleware) privateKeysMatch(ctx context.Context, cr signer.CertificateRequestObject, dns3lPrivateKeyPEM string) (bool, error) {
+	// Get private key from secret
+	privateKey, err := c.getNextPrivateKey(ctx, cr)
+	if err != nil {
+		return false, err
+	}
+
+	// Decode private key from DNS3L
+	block, _ := pem.Decode([]byte(dns3lPrivateKeyPEM))
+	if block == nil {
+		return false, errors.New("failed to decode PEM block containing private key from DNS3L")
+	}
+
+	dns3lPrivateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return false, err
+	}
+
+	// Compare private keys
+	equal, err := privateKeysEqual(privateKey, dns3lPrivateKey)
+	if err != nil {
+		return false, err
+	}
+	return equal, nil
+}
+
+func (c *createCertMiddleware) getNextPrivateKey(ctx context.Context, cr signer.CertificateRequestObject) (crypto.PrivateKey, error) {
+	// First get secret name from CertificateRequest annotation
+	secretName, ok := cr.GetAnnotations()[cmapi.CertificateRequestPrivateKeyAnnotationKey]
+	if !ok {
+		return nil, errors.New("certificate request does not have a secret name annotation")
+	}
+
+	// Get secret using secret name from CertificateRequest
+	var (
+		secret corev1.Secret
+
+		secretK8sName = client.ObjectKey{Namespace: cr.GetNamespace(), Name: secretName}
+	)
+	err := c.client.Get(ctx, secretK8sName, &secret)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get private key from secret
+	privateKeyBytes, ok := secret.Data[corev1.TLSPrivateKeyKey]
+	if !ok {
+		return nil, errors.New("secret does not contain a private key")
+	}
+
+	// Decode private key
+	privateKey, err := utilpki.DecodePrivateKeyBytes(privateKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return privateKey, nil
 }
 
 func (c *createCertMiddleware) patchCertificateRequestPublicKey(
@@ -201,7 +294,7 @@ func (c *createCertMiddleware) patchPrivateKeyInSecret(
 ) error {
 	logger := logs.FromContext(ctx, issuerName)
 
-	// First fetch certificate by certificate request annotation
+	// First get secret name from CertificateRequest annotation
 	secretName, ok := cr.GetAnnotations()[cmapi.CertificateRequestPrivateKeyAnnotationKey]
 	if !ok {
 		return errors.New("certificate request does not have a secret name annotation")
@@ -211,7 +304,7 @@ func (c *createCertMiddleware) patchPrivateKeyInSecret(
 		"secret", secretName,
 	)
 
-	// Get secret using secret name from certificate request
+	// Get secret using secret name from CertificateRequest
 	var (
 		secret corev1.Secret
 
@@ -247,4 +340,17 @@ func (c *createCertMiddleware) patchPrivateKeyInSecret(
 	}
 
 	return nil
+}
+
+func privateKeysEqual(a, b crypto.PrivateKey) (bool, error) {
+	switch priv := a.(type) {
+	case *rsa.PrivateKey:
+		return priv.Equal(b), nil
+	case *ecdsa.PrivateKey:
+		return priv.Equal(b), nil
+	case ed25519.PrivateKey:
+		return priv.Equal(b), nil
+	default:
+		return false, fmt.Errorf("unrecognised public key type: %T", a)
+	}
 }

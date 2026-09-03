@@ -148,3 +148,5 @@ Usually cert-manager takes care about creating the certificate key pair. To prev
     ```
 
 Afterwards certificates can be created as usual as described in the cert-manager documentation.
+
+> :warning: The controller does not yet support authentication for the creation of certificates. The DNS3L instance must be configured without authentication. 
